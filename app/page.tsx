@@ -1,46 +1,56 @@
+"use client";
+
+import { useState } from "react";
 import AssetWall from "@/components/AssetWall";
 import MapPanel from "@/components/MapPanel";
 import NewsPanel from "@/components/NewsPanel";
+import { LinkedEvent } from "@/lib/news-linking";
 
 export default function Page() {
+  const [selectedEvent, setSelectedEvent] = useState<LinkedEvent | null>(null);
+
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100">
-      {/* Top bar */}
-      <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur">
-        <div className="mx-auto max-w-[1500px] px-4 py-3 flex items-center justify-between">
+      <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/85 backdrop-blur">
+        <div className="mx-auto max-w-[1800px] px-4 py-3 flex items-center justify-between">
           <div>
-            <div className="text-lg font-semibold tracking-tight">
+            <div className="text-2xl font-semibold tracking-tight">
               Commodity Intelligence Terminal
             </div>
-            <div className="text-xs text-zinc-400">
+            <div className="text-sm text-zinc-400">
               Real-time prices + commodity news + geo context
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="text-xs px-2 py-1 rounded-full border border-zinc-800 bg-zinc-900 text-zinc-300">
-              Dark Mode
-            </div>
-            <div className="text-xs px-2 py-1 rounded-full border border-zinc-800 bg-zinc-900 text-zinc-300">
-              MapLibre
             </div>
           </div>
         </div>
       </div>
 
-      {/* 3-column layout */}
-      <div className="mx-auto max-w-[1500px] px-4 py-5 grid grid-cols-12 gap-4">
-        {/* Left: Prices */}
-        <section className="col-span-12 lg:col-span-4">
+      <div className="mx-auto max-w-[1800px] px-4 py-5 grid grid-cols-12 gap-4 items-start">
+        <section className="col-span-12 xl:col-span-5 min-w-0">
           <Panel title="Market Watch" subtitle="Commodities first • then macro">
-            {/* 你之後可以改成只顯示 Commodities + 選幾個 FX/Rates */}
-            <AssetWall />
+            <div className="max-h-[calc(100vh-180px)] overflow-y-auto pr-1">
+              <AssetWall highlightedIds={selectedEvent?.affectedAssets ?? []} />
+            </div>
           </Panel>
         </section>
 
-        {/* Middle: News */}
-        <section className="col-span-12 lg:col-span-4">
-          <NewsPanel />
+        <section className="col-span-12 xl:col-span-4 min-w-0">
+          <div className="max-h-[calc(100vh-180px)] overflow-y-auto space-y-4">
+            <NewsPanel onSelectEvent={setSelectedEvent} />
+
+            {selectedEvent && (
+              <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                <div className="text-sm font-semibold text-cyan-200">Selected Event</div>
+                <div className="mt-2 text-sm text-zinc-100">{selectedEvent.title}</div>
+                <div className="mt-2 text-xs text-zinc-400">
+                  Affected: {(selectedEvent.affectedAssets ?? []).join(", ") || "N/A"}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="col-span-12 xl:col-span-3 min-w-0">
+          <MapPanel focus={selectedEvent?.focus ?? null} />
         </section>
       </div>
     </main>
@@ -59,31 +69,10 @@ function Panel({
   return (
     <div className="rounded-2xl border border-zinc-800 bg-zinc-900">
       <div className="px-4 py-3 border-b border-zinc-800">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="text-sm font-semibold text-zinc-100">{title}</div>
-            {subtitle && <div className="text-xs text-zinc-400 mt-0.5">{subtitle}</div>}
-          </div>
-        </div>
+        <div className="text-lg font-semibold text-zinc-100">{title}</div>
+        {subtitle && <div className="text-sm text-zinc-400 mt-1">{subtitle}</div>}
       </div>
       <div className="p-4">{children}</div>
-    </div>
-  );
-}
-
-function Chip({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="text-xs px-2 py-1 rounded-full border border-zinc-800 bg-zinc-950 text-zinc-300">
-      {children}
-    </span>
-  );
-}
-
-function NewsCard({ title, meta }: { title: string; meta: string }) {
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 hover:bg-zinc-900 transition">
-      <div className="text-sm text-zinc-100 leading-snug">{title}</div>
-      <div className="mt-2 text-xs text-zinc-400">{meta}</div>
     </div>
   );
 }

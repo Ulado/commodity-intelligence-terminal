@@ -52,7 +52,11 @@ function median(arr: number[]) {
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
 
-export default function AssetWall() {
+export default function AssetWall({
+    highlightedIds = [],
+  }: {
+    highlightedIds?: string[];
+  }){
   const [tab, setTab] = useState<Asset["group"] | "All">("All");
   const [live, setLive] = useState<Record<string, LiveAsset>>({});
   const [anchor, setAnchor] = useState<Anchor>({});
@@ -161,9 +165,8 @@ export default function AssetWall() {
             // 往 base 收斂：70% base + 30% 自己（避免瞬間跳針）
             newPrice = Math.max(0.0001, cur.last * 0.3 + base * 0.7 + noise);
           } else {
-            // 沒真實價：維持原本 random walk
-            const drift = (Math.random() - 0.5) * vol;
-            newPrice = Math.max(0.0001, cur.last + drift);
+            // 沒真實價：不要再亂飄，維持原價
+            newPrice = cur.last;
           }
 
           const newSeries = [...cur.series, { t: now, v: newPrice }].slice(-60);
@@ -231,16 +234,20 @@ export default function AssetWall() {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-3 gap-3">
         {list.map((a) => (
-          <AssetCard key={a.meta.id} a={a} hasAnchor={!!anchor[a.meta.id]} />
+          <AssetCard key={a.meta.id} a={a} hasAnchor={!!anchor[a.meta.id]} highlighted={highlightedIds.includes(a.meta.id)} />
         ))}
       </div>
     </div>
   );
 }
 
-function AssetCard({ a, hasAnchor }: { a: LiveAsset; hasAnchor: boolean }) {
+function AssetCard({ a,hasAnchor,highlighted,}: {
+  a: LiveAsset;
+  hasAnchor: boolean;
+  highlighted?: boolean;
+}) {
   const p1h = pct(a.last, a.prev1h);
   const p24h = pct(a.last, a.prev24h);
   const up =
@@ -258,31 +265,60 @@ function AssetCard({ a, hasAnchor }: { a: LiveAsset; hasAnchor: boolean }) {
   const pad = span * 0.15 || Math.max(1, Math.abs(mid) * 0.01);
 
   return (
-    <div className="rounded-2xl border border-zinc-800 p-3 bg-zinc-950">
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className="text-sm text-zinc-400 flex items-center gap-2">
-            {a.meta.group}
-            <span className={`text-[10px] px-2 py-[2px] rounded-full border ${hasAnchor ? "bg-green-50" : "bg-gray-50"}`}>
-              {hasAnchor ? "LIVE" : "SIM"}
-            </span>
+    <div
+    className={[
+      "rounded-2xl border p-3 bg-zinc-950 transition",
+      highlighted
+        ? "border-cyan-400 shadow-[0_0_0_1px_rgba(34,211,238,0.4),0_0_24px_rgba(34,211,238,0.18)]"
+        : "border-zinc-800",
+    ].join(" ")}
+  >
+      <div className="flex flex-col gap-2">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm text-zinc-400 flex items-center gap-2">
+              {a.meta.group}
+              <span
+                className={`text-[10px] px-2 py-[2px] rounded-full border ${
+                  hasAnchor
+                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
+                    : "bg-zinc-800 text-zinc-300 border-zinc-700"
+                }`}
+              >
+                {hasAnchor ? "LIVE" : "NO DATA"}
+              </span>
+            </div>
+
+            <div className="text-base font-semibold text-zinc-100 leading-tight line-clamp-2 min-h-[40px]">
+              {a.meta.name}
+            </div>
+
+            <div className="text-xs text-zinc-500">{a.meta.id}</div>
           </div>
-          <div className="text-lg font-semibold">{a.meta.name}</div>
-          <div className="text-xs text-gray-500">{a.meta.id}</div>
+
+          <div className="text-right shrink-0 min-w-[110px]">
+            {hasAnchor ? (
+              <div className="text-xl font-semibold whitespace-nowrap tabular-nums text-zinc-100">
+                {fmtPrice(a.meta.id, a.last)}
+                {a.meta.unit ? a.meta.unit : ""}
+              </div>
+            ) : (
+              <div className="text-sm font-semibold text-zinc-500 whitespace-nowrap">
+                NO DATA
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="text-right shrink-0 min-w-[120px]">
-          <div className="text-xl font-semibold whitespace-nowrap tabular-nums">
-            {fmtPrice(a.meta.id, a.last)}{a.meta.unit ? a.meta.unit : ""}
-          </div>
-          <div className="flex gap-2 justify-end text-xs whitespace-nowrap tabular-nums">
-            <span className={p1h >= 0 ? "text-emerald-300" : "text-red-300"}>
-              1h {p1h >= 0 ? "+" : ""}{p1h.toFixed(2)}%
-            </span>
-            <span className={p24h >= 0 ? "text-emerald-300" : "text-red-300"}>
-              24h {p24h >= 0 ? "+" : ""}{p24h.toFixed(2)}%
-            </span>
-          </div>
+        <div className="flex justify-end gap-2 text-xs whitespace-nowrap tabular-nums">
+          <span className={p1h >= 0 ? "text-emerald-300" : "text-red-300"}>
+            1h {p1h >= 0 ? "+" : ""}
+            {p1h.toFixed(2)}%
+          </span>
+          <span className={p24h >= 0 ? "text-emerald-300" : "text-red-300"}>
+            24h {p24h >= 0 ? "+" : ""}
+            {p24h.toFixed(2)}%
+          </span>
         </div>
       </div>
 
