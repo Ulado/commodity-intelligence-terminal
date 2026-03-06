@@ -1,16 +1,22 @@
 import { NextResponse } from "next/server";
-import yahooFinance from "yahoo-finance2";
+import YahooFinance from "yahoo-finance2";
 
-type PriceMap = Record<string, number>;
+const yahooFinance = new YahooFinance();
+
+type PricePoint = {
+  price: number;
+  prevClose?: number;
+};
+
+type PriceMap = Record<string, PricePoint>;
 
 let CACHE: {
   data: PriceMap;
   ts: number;
 } | null = null;
 
-const CACHE_TTL = 60 * 1000; // 1分鐘
+const CACHE_TTL = 60 * 1000; // 1 分鐘
 
-// symbol mapping
 const YAHOO_SYMBOLS: Record<string, string> = {
   USDJPY: "JPY=X",
   EURUSD: "EURUSD=X",
@@ -35,51 +41,118 @@ const YAHOO_SYMBOLS: Record<string, string> = {
   SOL: "SOL-USD",
 };
 
-// Rates 先用 proxy
-async function fetchRates(): Promise<PriceMap> {
-  try {
-    const res = await fetch(
-      "https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key=YOUR_FRED_KEY&file_type=json",
-      { cache: "no-store" }
-    );
+async function fetchYahoo(): Promise<PriceMap> {
+  const entries = Object.entries(YAHOO_SYMBOLS);
 
-    const json = await res.json();
+  const results = await Promise.all(
+    entries.map(async ([id, symbol]) => {
+      try {
+        console.log(`[Yahoo] fetching ${id} -> ${symbol}`);
 
-    const latest = json.observations?.at(-1)?.value;
+        const q: any = await yahooFinance.quote(symbol);
 
-    return {
-      US10Y: parseFloat(latest),
-    };
-  } catch {
-    return {};
-  }
+        console.log(`[Yahoo] raw result for ${id}:`, {
+          symbol,
+          regularMarketPrice: q?.regularMarketPrice,
+          postMarketPrice: q?.postMarketPrice,
+          preMarketPrice: q?.preMarketPrice,
+          regularMarketPreviousClose: q?.regularMarketPreviousClose,
+        });
+
+        const price =
+          q?.regularMarketPrice ??
+          q?.postMarketPrice ??
+          q?.preMarketPrice;
+
+        const prevClose = q?.regularMarketPreviousClose;
+
+        if (typeof price !== "number") {
+          console.log(`[Yahoo] no valid price for ${id}`);
+          return null;
+        }
+
+        return [
+          id,
+          {
+            price,
+            prevClose:
+              typeof prevClose === "number" ? prevClose : undefined,
+          },
+        ] as const;
+      } catch (err: any) {
+        console.error(`[Yahoo] failed ${id} -> ${symbol}`, err);
+        return null;
+      }
+    })
+  );
+
+  return Object.fromEntries(
+    results.filter(Boolean) as Array<readonly [string, PricePoint]>
+  );
 }
 
-async function fetchYahoo(): Promise<PriceMap> {
-  const symbols = Object.values(YAHOO_SYMBOLS);
-
-  try {
-    const quotes = await yahooFinance.quote(symbols);
-
-    const map: PriceMap = {};
-
-    for (const q of quotes) {
-      const entry = Object.entries(YAHOO_SYMBOLS).find(
-        ([, s]) => s === q.symbol
-      );
-
-      if (!entry) continue;
-
-      const id = entry[0];
-
-      map[id] = q.regularMarketPrice ?? q.postMarketPrice ?? q.preMarketPrice;
-    }
-
-    return map;
-  } catch (e) {
-    console.error("Yahoo fetch error", e);
+async function fetchFRED(): Promise<PriceMap> {
+  const key = process.env.FRED_API_KEY;
+  if (!key) {
+    console.error("[FRED] missing FRED_API_KEY");
     return {};
   }
+
+  const seriesMap: Record<string, string> = {
+    US2Y: "DGS2",
+    US10Y: "DGS10",
+    US30Y: "DGS30",
+    SOFR: "SOFR",
+  };
+
+  const results = await Promise.all(
+    Object.entries(seriesMap).map(async ([id, seriesId]) => {
+      try {
+        const url =
+          `https://api.stlouisfed.org/fred/series/observations` +
+          `?series_id=${encodeURIComponent(seriesId)}` +
+          `&api_key=${encodeURIComponent(key)}` +
+          `&file_type=json&sort_order=desc&limit=2`;
+
+        console.log(`[FRED] fetching ${id} -> ${seriesId}`);
+
+        const res = await fetch(url, { cache: "no-store" });
+        console.log(`[FRED] response ${id}:`, res.status, res.statusText);
+
+        if (!res.ok) return null;
+
+        const json: any = await res.json();
+        const obs = json?.observations;
+
+        if (!Array.isArray(obs) || obs.length === 0) {
+          console.log(`[FRED] no observations for ${id}`);
+          return null;
+        }
+
+        const latest = parseFloat(obs[0]?.value);
+        const prev = obs.length > 1 ? parseFloat(obs[1]?.value) : NaN;
+
+        console.log(`[FRED] parsed ${id}: latest=${latest}, prev=${prev}`);
+
+        if (!isFinite(latest)) return null;
+
+        return [
+          id,
+          {
+            price: latest,
+            prevClose: isFinite(prev) ? prev : undefined,
+          },
+        ] as const;
+      } catch (err: any) {
+        console.error(`[FRED] failed ${id} -> ${seriesId}`, err);
+        return null;
+      }
+    })
+  );
+
+  return Object.fromEntries(
+    results.filter(Boolean) as Array<readonly [string, PricePoint]>
+  );
 }
 
 export async function GET() {
@@ -92,15 +165,22 @@ export async function GET() {
     });
   }
 
-  const [yahoo, rates] = await Promise.all([
+  const [yahooData, fredData] = await Promise.all([
     fetchYahoo(),
-    fetchRates(),
+    fetchFRED(),
   ]);
 
-  const merged = {
-    ...yahoo,
-    ...rates,
+  const merged: PriceMap = {
+    ...yahooData,
+    ...fredData,
   };
+
+  if (Object.keys(merged).length > 0) {
+    CACHE = {
+      data: merged,
+      ts: now,
+    };
+  }
 
   CACHE = {
     data: merged,
@@ -110,5 +190,9 @@ export async function GET() {
   return NextResponse.json({
     data: merged,
     cached: false,
+    failed: {
+      yahoo: Object.keys(YAHOO_SYMBOLS).filter((id) => !merged[id]),
+      fred: ["US2Y", "US10Y", "US30Y", "SOFR"].filter((id) => !merged[id]),
+    },
   });
 }
