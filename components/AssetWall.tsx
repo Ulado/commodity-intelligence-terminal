@@ -22,6 +22,78 @@ type LiveAsset = {
 
 type Anchor = Record<string, { price: number; prevClose?: number }>;
 
+function samePrice(a?: number, b?: number) {
+  if (typeof a !== "number" || typeof b !== "number") return false;
+  return Math.abs(a - b) < 1e-9;
+}
+
+function getWeekdayTimeParts(timeZone: string) {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+
+  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "Mon";
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+
+  return { weekday, hour, minute };
+}
+
+function isWeekday(weekday: string) {
+  return !["Sat", "Sun"].includes(weekday);
+}
+
+function minutesOfDay(hour: number, minute: number) {
+  return hour * 60 + minute;
+}
+
+function inRange(nowMin: number, startMin: number, endMin: number) {
+  return nowMin >= startMin && nowMin < endMin;
+}
+
+function getMarketStatus(a: Asset) {
+  const id = a.id;
+
+  if (a.group === "Crypto") {
+    return { isOpen: true, label: "交易中" };
+  }
+
+  if (["US2Y", "US10Y", "US30Y", "SOFR", "JGB10Y"].includes(id)) {
+    return { isOpen: false, label: "休市" };
+  }
+
+  if (["SPX", "NDX", "VIX"].includes(id)) {
+    const { weekday, hour, minute } = getWeekdayTimeParts("America/New_York");
+    if (!isWeekday(weekday)) return { isOpen: false, label: "休市" };
+    const nowMin = minutesOfDay(hour, minute);
+    return inRange(nowMin, 9 * 60 + 30, 16 * 60)
+      ? { isOpen: true, label: "交易中" }
+      : { isOpen: false, label: "休市" };
+  }
+
+  if (id === "NIKKEI") {
+    const { weekday, hour, minute } = getWeekdayTimeParts("Asia/Tokyo");
+    if (!isWeekday(weekday)) return { isOpen: false, label: "休市" };
+    const nowMin = minutesOfDay(hour, minute);
+    return inRange(nowMin, 9 * 60, 15 * 60)
+      ? { isOpen: true, label: "交易中" }
+      : { isOpen: false, label: "休市" };
+  }
+
+  if (a.group === "FX" || a.group === "Commodities") {
+    const { weekday } = getWeekdayTimeParts("America/New_York");
+    return isWeekday(weekday)
+      ? { isOpen: true, label: "交易中" }
+      : { isOpen: false, label: "休市" };
+  }
+
+  return { isOpen: true, label: "交易中" };
+}
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
@@ -104,29 +176,26 @@ export default function AssetWall({
         // 抓到 anchor 後，把 last 拉近真實價（避免一開始差太大）
         setLive((prev) => {
           const next = { ...prev };
+
           for (const id of Object.keys(next)) {
             const a = next[id];
             const ap = data[id]?.price;
             const pc = data[id]?.prevClose;
 
             if (typeof ap === "number" && isFinite(ap)) {
-              // 直接把 last anchor 到真實價附近
-              const adjusted = a.last * 0.2 + ap * 0.8;
+              const prev24h =
+                typeof pc === "number" && isFinite(pc) ? pc : a.prev24h;
 
-              // 24h% 用 prevClose（有的話）
-              const prev24h = typeof pc === "number" && isFinite(pc) ? pc : a.prev24h;
-
-              // 同步 series 末端往真實價靠一下（不然圖會落差很怪）
-              const series = a.series.map((p) => ({ ...p, v: p.v * 0.2 + ap * 0.8 }));
-
+              // 只在第一次還沒對齊時，直接把最後價格拉到真實價
+              // 不要整條 series 全部重寫
               next[id] = {
                 ...a,
-                last: adjusted,
+                last: ap,
                 prev24h,
-                series,
               };
             }
           }
+
           return next;
         });
       } catch {
@@ -142,69 +211,75 @@ export default function AssetWall({
     };
   }, []);
 
-  // 3) 每 2 秒更新：靠近 anchor 的小抖動（爽感＋不失真）
   useEffect(() => {
-    const timer = setInterval(() => {
-      setLive((prev) => {
-        const next: Record<string, LiveAsset> = { ...prev };
-        const now = Date.now();
+    setLive((prev) => {
+      const next: Record<string, LiveAsset> = { ...prev };
+      const now = Date.now();
 
-        for (const id of Object.keys(next)) {
-          const cur = next[id];
-          const vol = cur.meta.vol;
+      for (const id of Object.keys(next)) {
+        const cur = next[id];
+        const base = anchor[id]?.price;
+        const prevClose = anchor[id]?.prevClose;
 
-          const base = anchor[id]?.price; // 真實價中心（可能沒有）
-          const prevClose = anchor[id]?.prevClose;
+        if (typeof base !== "number" || !isFinite(base)) continue;
 
-          // 噪音幅度：用 vol 的 10~15%（避免亂跳）
-          const noise = (Math.random() - 0.5) * (vol * 0.15);
+        const priceUnchanged = samePrice(cur.last, base);
+        const nextPrev24h =
+          typeof prevClose === "number" && isFinite(prevClose)
+            ? prevClose
+            : cur.prev24h;
 
-          let newPrice: number;
-
-          if (typeof base === "number" && isFinite(base)) {
-            // 往 base 收斂：70% base + 30% 自己（避免瞬間跳針）
-            newPrice = Math.max(0.0001, cur.last * 0.3 + base * 0.7 + noise);
-          } else {
-            // 沒真實價：不要再亂飄，維持原價
-            newPrice = cur.last;
-          }
-
-          const newSeries = [...cur.series, { t: now, v: newPrice }].slice(-60);
-
-          // 1h：用 series 的最舊點當近似（MVP）
-          const approx1h = newSeries[0]?.v ?? newPrice;
-
-          // 24h：若有 prevClose 用 prevClose，否則沿用舊邏輯
-          const approx24h =
-            typeof prevClose === "number" && isFinite(prevClose)
-              ? prevClose
-              : cur.prev24h;
-
+        if (priceUnchanged) {
           next[id] = {
             ...cur,
-            last: newPrice,
-            prev1h: approx1h,
-            prev24h: approx24h,
-            series: newSeries,
+            prev24h: nextPrev24h,
           };
+          continue;
         }
 
-        return next;
-      });
-    }, 2000);
+        const newSeries = [...cur.series, { t: now, v: base }].slice(-60);
+        const approx1h = newSeries[0]?.v ?? base;
+
+        next[id] = {
+          ...cur,
+          last: base,
+          prev1h: approx1h,
+          prev24h: nextPrev24h,
+          series: newSeries,
+        };
+      }
+
+      return next;
+    });
+  }, [anchor]);
+
+  const [nowTick, setNowTick] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTick(Date.now());
+    }, 60_000);
 
     return () => clearInterval(timer);
-  }, [anchor]);
+  }, []);
 
   const list = useMemo(() => {
     const arr = Object.values(live);
+
     arr.sort((a, b) => {
+      const aOpen = getMarketStatus(a.meta).isOpen ? 1 : 0;
+      const bOpen = getMarketStatus(b.meta).isOpen ? 1 : 0;
+
+      if (aOpen !== bOpen) return bOpen - aOpen;
+
       const go = groupOrder(a.meta.group) - groupOrder(b.meta.group);
       if (go !== 0) return go;
+
       return a.meta.id.localeCompare(b.meta.id);
     });
+
     return tab === "All" ? arr : arr.filter((x) => x.meta.group === tab);
-  }, [live, tab]);
+  }, [live, tab, nowTick]);
 
   const tabs: Array<Asset["group"] | "All"> = [
     "All",
@@ -248,6 +323,7 @@ function AssetCard({ a,hasAnchor,highlighted,}: {
   hasAnchor: boolean;
   highlighted?: boolean;
 }) {
+  const marketStatus = getMarketStatus(a.meta);
   const p1h = pct(a.last, a.prev1h);
   const p24h = pct(a.last, a.prev24h);
   const up =
@@ -276,19 +352,28 @@ function AssetCard({ a,hasAnchor,highlighted,}: {
       <div className="flex flex-col gap-2">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-sm text-zinc-400 flex items-center gap-2">
-              {a.meta.group}
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                {a.meta.group}
+              </span>
+
               <span
-                className={`text-[10px] px-2 py-[2px] rounded-full border ${
+                className={[
+                  "text-[10px] px-2 py-0.5 rounded-full border",
                   hasAnchor
-                    ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
-                    : "bg-zinc-800 text-zinc-300 border-zinc-700"
-                }`}
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                    : "border-zinc-700 bg-zinc-900 text-zinc-400",
+                ].join(" ")}
               >
                 {hasAnchor ? "LIVE" : "NO DATA"}
               </span>
-            </div>
 
+              {!marketStatus.isOpen && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-300">
+                  非交易
+                </span>
+              )}
+            </div>
             <div className="text-base font-semibold text-zinc-100 leading-tight line-clamp-2 min-h-[40px]">
               {a.meta.name}
             </div>

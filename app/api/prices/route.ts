@@ -182,11 +182,6 @@ export async function GET() {
     };
   }
 
-  CACHE = {
-    data: merged,
-    ts: now,
-  };
-
   return NextResponse.json({
     data: merged,
     cached: false,
